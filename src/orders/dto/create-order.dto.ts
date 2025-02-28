@@ -8,6 +8,6 @@ export class CreateOrderDto {
     @ArrayMinSize(1)
     @ValidateNested({ each: true })
     @Type( () => OrderItemDto )
-    items: OrderItemDto[];
+    aItems: OrderItemDto[];
     
 }

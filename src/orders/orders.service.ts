@@ -6,6 +6,8 @@ import { ClientProxy, RpcException } from '@nestjs/microservices';
 import { OrderPaginationDto } from './dto/order-pagination.dto';
 import { ChangeOrderStatusDto } from './dto';
 import { firstValueFrom } from 'rxjs';
+import { OrderWithProducts } from './interfaces/order-with-products.interface';
+import { PaidOrderDto } from './dto/paid-order.dto';
 
 @Injectable()
 export class OrdersService extends PrismaClient implements OnModuleInit {
@@ -27,13 +29,13 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
         try {
 
             // 1. CONFIRMAR LOS IDS DE LOS PRODUCTOS
-            const nIdProducts = createOrderDto.items.map( item => item.nIdProduct );
+            const nIdProducts = createOrderDto.aItems.map( item => item.nIdProduct );
             const products = await firstValueFrom(
                 this.client.send( { cmd: 'validate_products' }, nIdProducts )
             );
 
             // 2. CÁLCULOS DE LOS VALORES
-            const totalAmount = createOrderDto.items.reduce( (acc, orderItem) => {
+            const totalAmount = createOrderDto.aItems.reduce( (acc, orderItem) => {
 
                 const nPrice = products.find( 
                     (product) => product.nIdProduct === orderItem.nIdProduct
@@ -42,18 +44,18 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
                 return acc + (nPrice * orderItem.nQuantity);
             }, 0);
 
-            const totalItems = createOrderDto.items.reduce( (acc, orderItem) => {
+            const totalItems = createOrderDto.aItems.reduce( (acc, orderItem) => {
                 return acc + orderItem.nQuantity;
             }, 0);
 
-            //3. CREAR UNA TRANSACCIÓN DE BASE DE DATOS
+            // 3. CREAR UNA TRANSACCIÓN DE BASE DE DATOS
             const order = await this.order.create({
                 data: {
                     nTotalAmount: totalAmount
                     ,nTotalItems: totalItems
                     ,OrderItem: {
                         createMany: {
-                            data: createOrderDto.items.map( (orderItem) => ({
+                            data: createOrderDto.aItems.map( (orderItem) => ({
                                 nPrice      : products.find( product => product.nIdProduct === orderItem.nIdProduct).nPrice
                                 ,nIdProduct : orderItem.nIdProduct
                                 ,nQuantity  : orderItem.nQuantity
@@ -76,7 +78,7 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
                 ...order
                 ,OrderItem: order.OrderItem.map( (orderItem) => ({
                     ...orderItem
-                    ,name: products.find( (product) => product.nIdProduct === orderItem.nIdProduct ).sProduct
+                    ,sName: products.find( (product) => product.nIdProduct === orderItem.nIdProduct ).sProduct
                 })),
             };
 
@@ -147,7 +149,7 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
             ...order
             ,OrderItem: order.OrderItem.map(  (orderItem) => ({
                 ...orderItem
-                ,name: products.find( (product) => product.nIdProduct === orderItem.nIdProduct ).sProduct
+                ,sName: products.find( (product) => product.nIdProduct === orderItem.nIdProduct ).sProduct
             }))
         };
     }
@@ -165,5 +167,54 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
             where: { nIdOrder }
             ,data: { sStatus: sStatus }
         });
+    }
+
+    async createPaymentSession( order: OrderWithProducts ){
+        try {
+            const paymentSession = await firstValueFrom(
+                this.client.send('create.payment.session', {
+                    nIdOrder    : order.nIdOrder
+                    ,sCurrency   : 'usd'
+                    ,aItems      : order.OrderItem.map( item => ({
+                        sName       : item.sName
+                        ,nPrice     : item.nPrice
+                        ,nQuantity  : item.nQuantity
+                    })),
+                    
+                }),
+            );
+    
+            return paymentSession;
+        } catch (error) {
+            throw new RpcException({
+                status  : HttpStatus.BAD_REQUEST
+                ,message: 'Check Logs'
+            })
+        }
+    }
+
+    async paidOrder( paidOrderDto:PaidOrderDto ){
+        this.logger.log('Order Paid');
+        this.logger.log(paidOrderDto);
+
+        const updatedOrder = await this.order.update({
+            where: { nIdOrder: paidOrderDto.nIdOrder }
+            ,data: {
+                sStatus         : 'PAID'
+                ,bPaid          : true
+                ,dPaidAt        : new Date()
+                ,stripeChargeId : paidOrderDto.stripePaymentId
+
+                //RELACION
+                ,OrderReceipt   : {
+                    create: {
+                        receiptUrl: paidOrderDto.receipUrl
+                    }
+                }
+            }
+        });
+
+        return updatedOrder;
+
     }
 }
